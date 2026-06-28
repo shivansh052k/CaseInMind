@@ -279,6 +279,31 @@ Documents can be added at **any point** during the case lifecycle. Type metadata
          └────────────────┬─────────────────┘
                           │
          ┌────────────────▼─────────────────┐
+         │          RANKING LAYER            │
+         │                                  │
+         │  Stage 1 — BM25 + Vector Search  │
+         │  (hybrid retrieval, top-N        │
+         │   candidates from ChromaDB       │
+         │   + legal data sources)          │
+         │                                  │
+         │  Stage 2 — Cross-Encoder         │
+         │  Re-ranking                      │
+         │  (deep semantic re-scoring of    │
+         │   top-N → top-K, runs locally    │
+         │   on MacBook CPU)                │
+         │                                  │
+         │  Stage 3 — Learning-to-Rank      │
+         │  (LTR with stage-aware features, │
+         │   trained on lawyer feedback     │
+         │   signals via XGBoost LambdaRank │
+         │   → final top-5 to agent)        │
+         │                                  │
+         │  Stage-aware weights per agent   │
+         │  (Motion ≠ Settlement ≠          │
+         │   Discovery ranking priorities)  │
+         └────────────────┬─────────────────┘
+                          │
+         ┌────────────────▼─────────────────┐
          │          LEGAL DATA LAYER         │
          │                                  │
          │  CourtListener API               │
@@ -445,6 +470,7 @@ Both modes share the same memory, data layer, RL engine, observability infrastru
 | Document Hub | ✅ | ✅ | None |
 | Legal Data Layer | ✅ | ✅ | None |
 | Six-Tier Guardrail System | ✅ | ✅ | Low — tiered application prevents latency stacking |
+| Three-Stage Ranking Layer | ✅ | ✅ | None — all tools free, run locally |
 
 ---
 
@@ -1025,8 +1051,80 @@ All integration points verified:
 | PyMuPDF + python-docx + pipeline | ✅ | Standard parsing |
 | pytest + LangGraph | ✅ | Standard Python testing |
 | GitHub Actions + CI/CD | ✅ | Free for public repos |
+| rank_bm25 + ChromaDB hybrid retrieval | ✅ | Native Python, no conflicts |
+| MiniLM cross-encoder + sentence-transformers | ✅ | Already in stack, same library |
+| XGBoost LTR + Colab training | ✅ | Standard Python, free GPU on Colab |
 
 ---
+
+
+---
+
+### Ranking Layer
+
+The ranking layer is a first-class component sitting between retrieval and every agent context window. Every agent that does research — Investigation, Discovery, Motion, Settlement, Conversational — passes all retrieved results through this pipeline before they reach the LLM. Without it, agents receive raw vector similarity results. With it, agents receive the most legally relevant, stage-appropriate content available.
+
+```
+Query
+  │
+  ▼
+Stage 1 — Hybrid Retrieval
+  BM25 (rank_bm25) + ChromaDB vector search → top-50 candidates
+  │
+  ▼
+Stage 2 — Cross-Encoder Re-ranking
+  Deep semantic re-scoring → top-10
+  Runs locally on MacBook CPU (MiniLM cross-encoder, ~90MB)
+  │
+  ▼
+Stage 3 — Learning-to-Rank (LTR)
+  Stage-aware feature scoring → final top-5 to agent context window
+  XGBoost LambdaRank trained on lawyer feedback signals
+  │
+  ▼
+Agent Context Window
+```
+
+**Stage 1 — Hybrid Retrieval**
+- Tool: `rank_bm25` (pure Python BM25, zero dependencies) + ChromaDB vector search
+- BM25 captures exact legal term matches (case names, statutes, specific legal phrases)
+- Vector search captures semantic similarity (conceptually related cases)
+- Combined via Reciprocal Rank Fusion (RRF) — standard hybrid retrieval fusion method
+- Returns top-50 candidates per query
+
+**Stage 2 — Cross-Encoder Re-ranking**
+- Tool: `cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers` (already in stack)
+- ~90MB model, runs on MacBook CPU in milliseconds per batch
+- Performs deep pairwise scoring between query and each candidate — far more accurate than bi-encoder retrieval alone
+- Reduces top-50 → top-10
+- Swap principle: replace MiniLM cross-encoder → legal-domain fine-tuned cross-encoder when GPU available
+
+**Stage 3 — Learning-to-Rank (LTR)**
+- Tool: XGBoost with `rank:ndcg` objective (already well-known from resume — XGBoost at Koders)
+- Features per candidate: BM25 score, cross-encoder score, document type match, stage relevance score, recency, citation count in corpus, prior lawyer interaction with this document
+- Trained periodically on Colab free GPU using accumulated lawyer feedback signals
+- Stage-aware: different feature weights per agent — Motion agent prioritizes precedents with similar fact patterns; Settlement agent prioritizes cases with similar award outcomes; Discovery agent prioritizes documents with contradictions
+- Reduces top-10 → final top-5 delivered to agent context window
+- Lawyer feedback on agent outputs (accept/reject/edit) is the primary LTR training signal — connects directly to RLHF pipeline
+
+**Why This Matters for RL:**
+LTR feedback signals from lawyer interactions flow directly into the RL pipeline. The ranking layer is not isolated — it is a learning component that gets better as the lawyer uses the system, creating a compounding improvement loop:
+```
+Lawyer feedback → LTR training → better ranking → better agent context → better outputs → more useful feedback
+```
+
+**Ranking Layer Tools:**
+
+| Tool | Purpose | Runs Where | Cost |
+|---|---|---|---|
+| `rank_bm25` | BM25 lexical retrieval | Locally on MacBook | Free |
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder re-ranking | Locally on MacBook CPU | Free (HuggingFace) |
+| XGBoost (rank:ndcg) | Learning-to-rank | MacBook (inference) + Colab (training) | Free |
+| Reciprocal Rank Fusion | Hybrid retrieval fusion | In-code, no library needed | Free |
+
+Add to `pyproject.toml`: `rank-bm25`, `xgboost` (sentence-transformers already included)
+
+**Swap principle:** Replace MiniLM cross-encoder → larger legal cross-encoder; replace XGBoost LTR → neural LTR model when GPU available.
 
 ### What We Explicitly Did Not Include
 
@@ -1092,6 +1190,7 @@ Create the project skeleton with all tooling configured, all dependencies instal
   - Document parsing: `pymupdf`, `python-docx`
   - Observability: `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-grpc`, `opentelemetry-instrumentation-fastapi`, `prometheus-client`
   - ML/Training: `wandb`, `datasets`
+  - Ranking: `rank-bm25`, `xgboost`
   - Testing: `pytest`, `pytest-asyncio`, `httpx`
 - Install all: `uv sync`
 - Verify: `uv run python -c "import langgraph; print('OK')"` — must print OK
@@ -1327,14 +1426,15 @@ One complete end-to-end working pipeline through Stages 1 and 2 — proves the e
 1. LangGraph orchestrator skeleton — StateGraph with case state schema defined
 2. Intake Worker Agent (Stage 1) — ingests case documents, extracts facts, assesses viability, produces structured case overview
 3. Investigation Worker Agent (Stage 2) — researches precedents via CourtListener, maps evidence to legal theories, surfaces weaknesses
-4. SQLite checkpoint integration — case state persists across sessions via SqliteSaver
-5. Basic working memory — case state flows through LangGraph graph state
-6. Tier 1 input guardrails wired — LLM Guard PII scrubbing before every LLM call
-7. Tier 4 output guardrails wired — citation verification via CourtListener on every output
-8. FastAPI backend skeleton — basic endpoints to trigger agents and retrieve outputs
-9. HITL checkpoint at end of Stage 2 — execution pauses, awaits lawyer approval before continuing
-10. OpenTelemetry instrumentation — every agent step, LLM call, tool use traced as a span
-11. Basic Next.js frontend — dashboard with case creation form and first case workspace pages showing Stage 1 and 2 outputs
+4. Basic ranking layer — BM25 (rank_bm25) + ChromaDB hybrid retrieval with Reciprocal Rank Fusion + MiniLM cross-encoder re-ranking; wired into Investigation agent as first implementation
+5. SQLite checkpoint integration — case state persists across sessions via SqliteSaver
+6. Basic working memory — case state flows through LangGraph graph state
+7. Tier 1 input guardrails wired — LLM Guard PII scrubbing before every LLM call
+8. Tier 4 output guardrails wired — citation verification via CourtListener on every output
+9. FastAPI backend skeleton — basic endpoints to trigger agents and retrieve outputs
+10. HITL checkpoint at end of Stage 2 — execution pauses, awaits lawyer approval before continuing
+11. OpenTelemetry instrumentation — every agent step, LLM call, tool use, ranking scores traced as spans
+12. Basic Next.js frontend — dashboard with case creation form and first case workspace pages showing Stage 1 and 2 outputs
 
 ---
 
@@ -1349,10 +1449,11 @@ All 7 specialist worker agents built and connected through the full pipeline.
 3. Discovery Worker Agent (Stage 5) — interrogatory generation, document requests, discovery gap analysis
 4. Motion Worker Agent (Stage 6) — motion drafting with grounded legal reasoning, strategy recommendation
 5. Settlement Worker Agent (Stage 7) — comparable case analysis, outcome modeling, negotiation brief
-6. Full orchestrator routing — orchestrator routes correctly across all 7 stages with conditional edges
-7. HITL checkpoints at every stage boundary — lawyer reviews and approves before each transition
-8. Stage-scoped guardrails — NeMo Guardrails enforces each agent to its designated stage only
-9. Full pipeline integration test — a complete case flows from Stage 1 through Stage 7
+6. Ranking layer extended to all agents — stage-aware ranking weights configured per agent (Motion prioritizes precedent similarity, Settlement prioritizes outcome similarity, Discovery prioritizes contradiction detection)
+7. Full orchestrator routing — orchestrator routes correctly across all 7 stages with conditional edges
+8. HITL checkpoints at every stage boundary — lawyer reviews and approves before each transition
+9. Stage-scoped guardrails — NeMo Guardrails enforces each agent to its designated stage only
+10. Full pipeline integration test — a complete case flows from Stage 1 through Stage 7 with ranking active at every stage
 
 ---
 
@@ -1368,6 +1469,7 @@ Upgrade from basic working memory to the full four-layer memory architecture.
 4. Memory retrieval integration — agents query relevant episodic and semantic memory before executing each task
 5. Episodic → semantic consolidation logic — explicit trigger (after N episodes or on case close) that distills episodes into semantic records
 6. Memory-aware orchestrator — orchestrator uses procedural memory to inform stage routing decisions
+7. LTR training pipeline — collect lawyer feedback signals from Phases 1-2 usage; train XGBoost LambdaRank model on Colab free GPU with accumulated interaction data; integrate trained LTR model into ranking layer Stage 3; ranking now improves based on what the lawyer finds useful
 
 ---
 
