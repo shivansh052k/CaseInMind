@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: caseinmind-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    depends_on:
+      - phoenix
+      - prometheus
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: caseinmind-phoenix
+    ports:
+      - "6006:6006" # Phoenix UI
+      - "4319:4317" # Phoenix's own OTLP gRPC receiver (avoids clashing with collector above)
+    environment:
+      - PHOENIX_WORKING_DIR=/mnt/data
+    volumes:
+      - phoenix-data:/mnt/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: caseinmind-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: caseinmind-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  phoenix-data:
+  prometheus-data:
+  grafana-data:
