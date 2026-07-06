@@ -1,0 +1,56 @@
+[project]
+name = "caseinmind"
+version = "0.1.0"
+description = "CaseInMind — Civil Litigation AI Paralegal Agent"
+readme = "README.md"
+requires-python = "==3.11.*"
+dependencies = [
+    # Core
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    "langchain-core",
+    "langchain-groq",
+    "langchain-google-genai",
+    "langchain-openai",
+    "chromadb",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "python-dotenv",
+
+    # Guardrails
+    "llm-guard",
+    "guardrails-ai",
+    "nemoguardrails",
+    "llamafirewall",
+
+    # Embeddings
+    "sentence-transformers",
+
+    # Document parsing
+    "pymupdf",
+    "python-docx",
+
+    # Observability
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-grpc",
+    "opentelemetry-instrumentation-fastapi",
+    "prometheus-client",
+
+    # ML / Training
+    "wandb",
+    "datasets",
+
+    # Ranking
+    "rank-bm25",
+    "xgboost",
+
+    # Testing
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
